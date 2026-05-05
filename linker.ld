@@ -1,15 +1,15 @@
-ENTRY(_start)
+ENTRY(start)
 SECTIONS
 {
-    . = 0x10000;
-    .text:{
+    . = 0x40100000;
+    .text : {
         *(.text)
     }
-    .ALIGN(4)
+    . = ALIGN(4);
     .data : {
         *(.data)
     }
-    .ALIGN(4)
+    . = ALIGN(4);
     .bss : {
         *(.bss)
     }
