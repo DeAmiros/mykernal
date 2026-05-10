@@ -14,7 +14,7 @@ pub fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn __aeabi_memcpy(dest: *mut u8, src: *const u8, n: usize)  {
+pub extern "C" fn __aeabi_memcpy(dest: *mut u8, src: *const u8, n: usize) {
     for i in 0..n {
         unsafe {
             *dest.add(i) = *src.add(i);
@@ -28,6 +28,29 @@ pub extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     dest
 }
 
+#[no_mangle]
+pub extern "C" fn __aeabi_memclr(dest: *mut u8, n: usize) {
+    for i in 0..n {
+        unsafe {
+            *dest.add(i) = 0;
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
+    for i in 0..n {
+        unsafe {
+            *dest.add(i) = c as u8;
+        }
+    }
+    dest
+}
+
+#[no_mangle]
+pub extern "C" fn __aeabi_memset(dest: *mut u8, n: usize, c: i32) {
+    memset(dest, c, n);
+}
 
 #[no_mangle]
 pub fn strlen(s: *const u8) -> usize {
@@ -41,6 +64,15 @@ pub fn strlen(s: *const u8) -> usize {
 pub fn print_hex(value: u8) {
     let hex_chars = b"0123456789abcdef";
     for i in (0..2).rev() {
+        let nibble = ((value >> (i * 4)) & 0xf) as usize;
+        uart::send_byte(hex_chars[nibble]);
+    }
+}
+
+
+pub fn print_hex_u32(value: u32) {
+    let hex_chars = b"0123456789abcdef";
+    for i in (0..8).rev() {
         let nibble = ((value >> (i * 4)) & 0xf) as usize;
         uart::send_byte(hex_chars[nibble]);
     }
@@ -67,7 +99,6 @@ pub enum FdtToken {
     Nop = 0x0000_0004,
     End = 0x0000_0009,
 }
-
 
 pub fn is_match(ptr: *const u8, len: usize, target: &[u8]) -> bool {
     if len != target.len() {

@@ -1,4 +1,6 @@
 use core::ops::Add;
+use core::ptr::write_volatile;
+use core::sync::atomic::Ordering;
 
 use crate::uart;
 use crate::utils;
@@ -44,8 +46,8 @@ pub struct VirtioMmio {
 pub struct Virtqueue {
     pub descriptors: [VirtqDescriptor; 256],
     pub available: VirtqAvail,
-    // We add a bit of padding here to ensure the Used ring is on a clean boundary
-    pub padding: [u8; 1024],
+    // Add padding to align the Used ring to 4096 bytes (8192 - 4614 = 3578)
+    pub padding: [u8; 3578],
     pub used: VirtqUsed,
 }
 
@@ -80,7 +82,7 @@ pub struct VirtqUsed {
     pub avail_event: u16, // (The hardware looks at this to see when to interrupt YOU)
 }
 
-static mut RX_QUEUE: Virtqueue = Virtqueue {
+pub static mut RX_QUEUE: Virtqueue = Virtqueue {
     descriptors: [VirtqDescriptor {
         addr: 0,
         len: 0,
@@ -93,7 +95,7 @@ static mut RX_QUEUE: Virtqueue = Virtqueue {
         ring: [0; 256],
         used_event: 0,
     },
-    padding: [0; 1024],
+    padding: [0; 3578],
     used: VirtqUsed {
         flags: 0,
         idx: 0,
@@ -102,7 +104,7 @@ static mut RX_QUEUE: Virtqueue = Virtqueue {
     },
 };
 
-static mut TX_QUEUE: Virtqueue = Virtqueue {
+pub static mut TX_QUEUE: Virtqueue = Virtqueue {
     descriptors: [VirtqDescriptor {
         addr: 0,
         len: 0,
@@ -115,7 +117,7 @@ static mut TX_QUEUE: Virtqueue = Virtqueue {
         ring: [0; 256],
         used_event: 0,
     },
-    padding: [0; 1024],
+    padding: [0; 3578],
     used: VirtqUsed {
         flags: 0,
         idx: 0,
@@ -167,7 +169,7 @@ pub fn plug_in_queues() {
             &(TX_QUEUE.used) as *const _ as u32,
         ); // Set used ring address
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*VIRTIO_MMIO).queue_used_high), 0x0);
-                core::ptr::write_volatile(core::ptr::addr_of_mut!((*VIRTIO_MMIO).queue_ready), 1); // Mark the queue as ready
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*VIRTIO_MMIO).queue_ready), 1); // Mark the queue as ready
 
         for i in 0..RX_BUFFERS.len() {
             RX_QUEUE.descriptors[i].addr = &RX_BUFFERS[i] as *const _ as u64;
@@ -177,19 +179,62 @@ pub fn plug_in_queues() {
             RX_QUEUE.available.ring[i] = i as u16; // Add to available ring
         }
         core::ptr::write_volatile(core::ptr::addr_of_mut!(RX_QUEUE.available.idx), 256); // Update available index
+
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*VIRTIO_MMIO).queue_notify), 0);
         // Notify the device about the new buffers\
-
     }
 }
 
 static mut last_used_rx_idx: u16 = 0;
 pub fn pull_rx() {
     unsafe {
-        if RX_QUEUE.used.idx != last_used_rx_idx {
-            last_used_rx_idx = RX_QUEUE.used.idx;
+        let current_used_idx = core::ptr::read_volatile(core::ptr::addr_of!(RX_QUEUE.used.idx));
+        if current_used_idx != last_used_rx_idx {
+            let ring_idx = (last_used_rx_idx % 256) as usize;
+            let desc_idx =
+                (core::ptr::read_volatile(core::ptr::addr_of!(RX_QUEUE.used.ring[ring_idx].id))
+                    as usize)
+                    % 256;
+            let len =
+                core::ptr::read_volatile(core::ptr::addr_of!(RX_QUEUE.used.ring[ring_idx].len))
+                    as usize;
 
-            uart::write_str("Pakcet Received!");
+            uart::write_str("\nPacket Received! Length: ");
+            utils::print_hex((len >> 8) as u8);
+            utils::print_hex(len as u8);
+            uart::write_str("\n");
+
+            let hdr_len = core::mem::size_of::<VirtioNetHeader>();
+            let payload_len = if len > hdr_len { len - hdr_len } else { 0 };
+
+            let safe_desc_idx = desc_idx % 256;
+            let max_data_len = RX_BUFFERS[safe_desc_idx].data.len();
+            let print_len = if payload_len > max_data_len {
+                max_data_len
+            } else {
+                payload_len
+            };
+
+            for i in 0..print_len {
+                let byte = RX_BUFFERS[safe_desc_idx].data[i];
+                utils::print_hex(byte);
+                uart::send_byte(b' ');
+                if i % 16 == 15 {
+                    uart::write_str("\n");
+                }
+            }
+            uart::write_str("\n");
+
+            last_used_rx_idx = last_used_rx_idx.wrapping_add(1);
+
+            let avail_idx = core::ptr::read_volatile(core::ptr::addr_of!(RX_QUEUE.available.idx));
+            let ring_avail_idx = (avail_idx % 256) as usize;
+            RX_QUEUE.available.ring[ring_avail_idx] = desc_idx as u16;
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(RX_QUEUE.available.idx),
+                avail_idx.wrapping_add(1),
+            );
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*VIRTIO_MMIO).queue_notify), 0);
         }
     }
 }
@@ -280,42 +325,70 @@ pub fn send_arp_request(target_ip: [u8; 4]) {
                 ptype: 0x0800u16.to_be(), // IPv4
                 hlen: 6,
                 plen: 4,
-                oper: 1u16.to_be(),      // ARP Request
-                sha: source_mac,         // Example source MAC
+                oper: 1u16.to_be(),  // ARP Request
+                sha: source_mac,     // Example source MAC
                 spa: [10, 0, 2, 15], // Example source IP
-                tha: [0; 6],             // Target MAC (unknown)
-                tpa: target_ip,          // Target IP
+                tha: [0; 6],         // Target MAC (unknown)
+                tpa: target_ip,      // Target IP
             },
         };
         send_packet(&arp_frame);
     }
 }
 
-pub fn send_packet(data_arp_fame: &ArpFrame) {
+pub fn send_packet(data_arp_frame: &ArpFrame) {
     unsafe {
         // Copy the data into the transmit buffer
         let size_of_frame = core::mem::size_of::<ArpFrame>();
+        let mut final_size = size_of_frame;
         let data =
-            core::slice::from_raw_parts(data_arp_fame as *const _ as *const u8, size_of_frame);
+            core::slice::from_raw_parts(data_arp_frame as *const _ as *const u8, size_of_frame);
         TX_BUFFERS[0].data[..size_of_frame].copy_from_slice(&data[..size_of_frame]);
 
-        // Set up the descriptor for the transmit buffer
+        if final_size < 60 {
+            for i in final_size..60 {
+                write_volatile(&mut TX_BUFFERS[0].data[i], 0);
+            }
+            final_size = 60;
+        }
+
         TX_QUEUE.descriptors[0].addr = &TX_BUFFERS[0] as *const _ as u64;
-        TX_QUEUE.descriptors[0].len =
-            (core::mem::size_of::<VirtioNetHeader>() + size_of_frame) as u32;
+        TX_QUEUE.descriptors[0].len = (core::mem::size_of::<VirtioNetHeader>() + final_size) as u32;
         TX_QUEUE.descriptors[0].flags = 0; // No special flags
         TX_QUEUE.descriptors[0].next = 0; // No next descriptor
 
         // Add the descriptor index to the available ring
-        let avail_idx: usize = TX_QUEUE.available.idx as usize % 256;
+        let current_idx = core::ptr::read_volatile(core::ptr::addr_of!(TX_QUEUE.available.idx));
+        let avail_idx: usize = current_idx as usize % 256;
         TX_QUEUE.available.ring[avail_idx] = 0; // Descriptor index 0
+
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+
         core::ptr::write_volatile(
             core::ptr::addr_of_mut!(TX_QUEUE.available.idx),
-            (avail_idx + 1) as u16,
+            current_idx.wrapping_add(1),
         );
+
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
 
         // Notify the device that a new packet is available
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*VIRTIO_MMIO).queue_notify), 1);
+    }
+}
+
+static mut TX_REPORTED: bool = false;
+
+pub fn get_tx_used() -> u16 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(TX_QUEUE.used.idx)) }
+}
+
+pub fn get_tx_reported() -> bool {
+    unsafe { TX_REPORTED }
+}
+
+pub fn set_tx_reported() {
+    unsafe {
+        TX_REPORTED = true;
     }
 }
 
@@ -330,20 +403,51 @@ pub fn init_virtio(magic: *const u32) {
         VIRTIO_MMIO = magic as *mut VirtioMmio;
 
         if core::ptr::read_volatile(core::ptr::addr_of!((*VIRTIO_MMIO).magic)) == 0x74726976 {
+            if core::ptr::read_volatile(core::ptr::addr_of!((*VIRTIO_MMIO).device_id)) != 1 {
+                uart::write_str("Device is not a network card!\n");
+                return;
+            }
+
             if core::ptr::read_volatile(core::ptr::addr_of!((*VIRTIO_MMIO).version)) == 2 {
                 core::ptr::write_volatile(core::ptr::addr_of_mut!((*VIRTIO_MMIO).status), 0);
                 core::ptr::write_volatile(core::ptr::addr_of_mut!((*VIRTIO_MMIO).status), 1);
                 core::ptr::write_volatile(core::ptr::addr_of_mut!((*VIRTIO_MMIO).status), 2 | 1);
+
+                // Negotiate features: Only accept VIRTIO_F_VERSION_1 (bit 32)
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!((*VIRTIO_MMIO).driver_features_sel),
+                    0,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!((*VIRTIO_MMIO).driver_features),
+                    (1 << 5) | (1 << 16),
+                );
+
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!((*VIRTIO_MMIO).driver_features_sel),
+                    1,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!((*VIRTIO_MMIO).driver_features),
+                    1,
+                ); // Bit 32 is bit 0 of sel 1
+
                 core::ptr::write_volatile(
                     core::ptr::addr_of_mut!((*VIRTIO_MMIO).status),
                     1 | 2 | 8,
                 );
+
+                let status = core::ptr::read_volatile(core::ptr::addr_of!((*VIRTIO_MMIO).status));
+                if (status & 8) == 0 {
+                    uart::write_str("FEATURES_OK rejected by device!\n");
+                }
+
+                plug_in_queues();
+
                 core::ptr::write_volatile(
                     core::ptr::addr_of_mut!((*VIRTIO_MMIO).status),
                     1 | 2 | 8 | 4,
                 );
-
-                plug_in_queues();
             }
         }
     }

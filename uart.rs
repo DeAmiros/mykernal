@@ -1,3 +1,5 @@
+use core::usize;
+
 use crate::utils::*;
 
 static mut UART_ADDR: u32 = 0;
@@ -17,6 +19,8 @@ pub fn send_byte(byte: u8) {
         }
     }
 }
+
+
 
 pub fn write_str(s: &str) {
     for byte in s.as_bytes() {

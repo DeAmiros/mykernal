@@ -39,7 +39,33 @@ pub extern "C" fn kernel_main() -> ! {
 
             loop {
                 virtio::pull_rx();
-  
+
+                let tx_used = virtio::get_tx_used();
+                if tx_used > 0 && virtio::get_tx_reported() == false {
+                    virtio::set_tx_reported();
+                    write_str("TX processed by QEMU!\n");
+                }
+
+                // Add a small delay and print the queue status
+                for _ in 0..1000000 {
+                    unsafe {
+                        core::arch::asm!("nop");
+                    }
+                }
+
+                let rx_used = unsafe {
+                    core::ptr::read_volatile(core::ptr::addr_of!(virtio::RX_QUEUE.used.idx))
+                };
+                let tx_avail = unsafe {
+                    core::ptr::read_volatile(core::ptr::addr_of!(virtio::TX_QUEUE.available.idx))
+                };
+                write_str("Tick: TX_AVAIL=");
+                utils::print_hex_u32(tx_avail as u32);
+                write_str(" TX_USED=");
+                utils::print_hex_u32(tx_used as u32);
+                write_str(" RX_USED=");
+                utils::print_hex_u32(rx_used as u32);
+                uart::write_str("\n");
             }
         }
 
