@@ -1,3 +1,4 @@
+use crate::uart;
 
 #[no_mangle]
 pub fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
@@ -13,12 +14,36 @@ pub fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn __aeabi_memcpy(dest: *mut u8, src: *const u8, n: usize)  {
+    for i in 0..n {
+        unsafe {
+            *dest.add(i) = *src.add(i);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    __aeabi_memcpy(dest, src, n);
+    dest
+}
+
+
+#[no_mangle]
 pub fn strlen(s: *const u8) -> usize {
     let mut len = 0;
     while unsafe { *s.add(len) } != 0 {
         len += 1;
     }
     len
+}
+
+pub fn print_hex(value: u8) {
+    let hex_chars = b"0123456789abcdef";
+    for i in (0..2).rev() {
+        let nibble = ((value >> (i * 4)) & 0xf) as usize;
+        uart::send_byte(hex_chars[nibble]);
+    }
 }
 
 #[no_mangle]

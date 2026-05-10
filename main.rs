@@ -3,12 +3,11 @@
 
 mod uart;
 mod utils;
+mod virtio;
 
 use core::{panic::PanicInfo, ptr::write_volatile};
-use utils::*;
 use uart::*;
-
-
+use utils::*;
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
@@ -17,21 +16,30 @@ fn panic(_info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
-    let dtb_ptr: *const u32 = 0x40_000_000 as *const u32;
+    let fdt_ptr: *const u32 = 0x40_000_000 as *const u32;
 
     unsafe {
         // Convert from Big-Endian to the CPU's native order
-        let magic = u32::from_be(*dtb_ptr);
+        let magic = u32::from_be(*fdt_ptr);
 
         if magic == 0xd00d_feed {
             // Now we know 'magic' is correct, so we read the size
 
-            set_special_addresses_from_dtb(dtb_ptr);
+            set_special_addresses_from_dtb(fdt_ptr);
+
+            if virtio::virtio_net_found() {
+                write_str("Virtio network device found!\n");
+            } else {
+                write_str("No Virtio network device found.\n");
+            }
+
+            virtio::print_mac_addr();
+
+            virtio::send_arp_request([10, 0, 2, 2]);
 
             loop {
-                let c = get_c();
-
-                send_byte(c.to_ascii_lowercase());
+                virtio::pull_rx();
+  
             }
         }
 
@@ -39,39 +47,44 @@ pub extern "C" fn kernel_main() -> ! {
     }
 }
 
-fn set_special_addresses_from_dtb(dtb_ptr: *const u32, ) -> () {
+fn set_special_addresses_from_dtb(fdt_ptr: *const u32) -> () {
     unsafe {
-        let total_size = u32::from_be(*dtb_ptr.add(1));
-        let structure_block_offset = u32::from_be(*dtb_ptr.add(2));
-        let strings_block_offset = u32::from_be(*dtb_ptr.add(3));
-        let mut list_of_hardware_pointer = dtb_ptr.add((structure_block_offset as usize) >>2 );
+        let total_size = u32::from_be(*fdt_ptr.add(1));
+        let structure_block_offset = u32::from_be(*fdt_ptr.add(2));
+        let strings_block_offset = u32::from_be(*fdt_ptr.add(3));
+        let mut node_ptr = fdt_ptr.add((structure_block_offset as usize) >> 2);
 
-        let mut uart_address: u32 = 0;
         let mut found_uart = false;
-        let mut current_node_reg_address: u32 = 0;
+        let mut found_virtio = false;
+        let mut base_addr: u32 = 0;
 
         loop {
-            let list_of_hardware_value = u32::from_be(*list_of_hardware_pointer);
+            let tag = u32::from_be(*node_ptr);
 
-            match parse_token(list_of_hardware_value) {
+            match parse_token(tag) {
                 Ok(FdtToken::End) => {
                     // Handle the end of the structure block
                     break;
                 }
 
                 Ok(FdtToken::EndNode) => {
-                    if found_uart && current_node_reg_address != 0 {
-                        uart::init(current_node_reg_address);
+                    if base_addr != 0 {
+                        if found_uart {
+                            uart::init_uart(base_addr);
+                        } else if found_virtio {
+                            // virtio::init(base_addr);
+                            virtio::init_virtio(base_addr as *const u32);
+                        }
                     }
 
-                    list_of_hardware_pointer = list_of_hardware_pointer.add(1);
+                    node_ptr = node_ptr.add(1);
                 }
 
                 Ok(FdtToken::Prop) => {
-                    let property_length = u32::from_be(*list_of_hardware_pointer.add(1));
-                    let name_offset = u32::from_be(*list_of_hardware_pointer.add(2));
+                    let property_length = u32::from_be(*node_ptr.add(1));
+                    let name_offset = u32::from_be(*node_ptr.add(2));
 
-                    let byte_ptr: *const u8 = dtb_ptr as *const u8;
+                    let byte_ptr: *const u8 = fdt_ptr as *const u8;
 
                     let name_ptr = byte_ptr
                         .add(strings_block_offset as usize)
@@ -79,39 +92,38 @@ fn set_special_addresses_from_dtb(dtb_ptr: *const u32, ) -> () {
 
                     if is_match(name_ptr, 4, b"reg\0") {
                         if property_length == 8 {
-                            current_node_reg_address =
-                                u32::from_be(*list_of_hardware_pointer.add(3));
+                            base_addr = u32::from_be(*node_ptr.add(3));
                         } else {
-                            current_node_reg_address =
-                                u32::from_be(*list_of_hardware_pointer.add(4));
+                            base_addr = u32::from_be(*node_ptr.add(4));
                         }
                     } else if is_match(name_ptr, 11, b"compatible\0") {
-                        let driver_id_pointer = list_of_hardware_pointer.add(3) as *const u8;
+                        let driver_id_pointer = node_ptr.add(3) as *const u8;
 
                         if is_match(driver_id_pointer, 10, b"arm,pl011\0") {
                             found_uart = true;
+                        } else if is_match(driver_id_pointer, 12, b"virtio,mmio\0") {
+                            found_virtio = true;
                         }
                     }
 
                     // After setting everything up
-                    list_of_hardware_pointer =
-                        list_of_hardware_pointer.add(((property_length as usize + 3) >> 2) + 3);
+                    node_ptr = node_ptr.add(((property_length as usize + 3) >> 2) + 3);
                 }
 
                 Ok(FdtToken::BeginNode) => {
                     found_uart = false;
-                    current_node_reg_address = 0;
+                    found_virtio = false;
+                    base_addr = 0;
 
-                    let name_length = strlen(list_of_hardware_pointer.add(1) as *const u8);
+                    let name_length = strlen(node_ptr.add(1) as *const u8);
 
                     // Move the pointer to the next token after the node name
-                    list_of_hardware_pointer =
-                        list_of_hardware_pointer.add(((name_length) >> 2) + 2);
+                    node_ptr = node_ptr.add(((name_length) >> 2) + 2);
                     // same as doing name_len + 1 + 3 ...
                 }
 
                 Ok(_) => {
-                    list_of_hardware_pointer = list_of_hardware_pointer.add(1);
+                    node_ptr = node_ptr.add(1);
 
                     // Handle the token as needed
                     // For example, you could print it or store it in a data structure

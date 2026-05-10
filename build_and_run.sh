@@ -28,4 +28,4 @@ fi
 # 4. Run in QEMU
 echo "--- Starting QEMU ---"
 echo "Press Ctrl+A then X to exit QEMU"
-qemu-system-arm -M virt -cpu cortex-a15 -kernel kernel.elf -nographic
+qemu-system-arm -M virt -cpu cortex-a15 -kernel kernel.elf -nographic -netdev user,id=net0 -device virtio-net-device,netdev=net0 

@@ -3,7 +3,7 @@ use crate::utils::*;
 static mut UART_ADDR: u32 = 0;
 
 // This replaces your "Uart::new"
-pub fn init(base_address: u32) {
+pub fn init_uart(base_address: u32) {
     unsafe {
         UART_ADDR = base_address;
     }
@@ -24,7 +24,7 @@ pub fn write_str(s: &str) {
     }
 }
 
-pub fn get_c() -> u8 {
+pub fn uart_getc() -> u8 {
     unsafe {
         if UART_ADDR != 0 {
             let flag_reg_ptr = (UART_ADDR + 0x18) as *const u8; // Assuming flag register is at offset 5
