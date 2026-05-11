@@ -13,6 +13,13 @@ use utils::*;
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
 }
+#[no_mangle]
+pub extern "C" fn __rust_alloc_error_handler(_size: usize, _align: usize) -> ! {
+    loop {}
+}
+// This is the specific one the linker is crying about
+
+
 
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
@@ -59,13 +66,13 @@ pub extern "C" fn kernel_main() -> ! {
                 let tx_avail = unsafe {
                     core::ptr::read_volatile(core::ptr::addr_of!(virtio::TX_QUEUE.available.idx))
                 };
-                write_str("Tick: TX_AVAIL=");
-                utils::print_hex_u32(tx_avail as u32);
-                write_str(" TX_USED=");
-                utils::print_hex_u32(tx_used as u32);
-                write_str(" RX_USED=");
-                utils::print_hex_u32(rx_used as u32);
-                uart::write_str("\n");
+                //write_str("Tick: TX_AVAIL=");
+                //utils::print_hex_u32(tx_avail as u32);
+                //write_str(" TX_USED=");
+                //utils::print_hex_u32(tx_used as u32);
+                //write_str(" RX_USED=");
+                //utils::print_hex_u32(rx_used as u32);
+                //uart::write_str("\n");
             }
         }
 
@@ -83,6 +90,8 @@ fn set_special_addresses_from_dtb(fdt_ptr: *const u32) -> () {
         let mut found_uart = false;
         let mut found_virtio = false;
         let mut base_addr: u32 = 0;
+        let mut virtio_bases = [core::mem::MaybeUninit::<u32>::uninit(); 32];
+        let mut virtio_base_count = 0usize;
 
         loop {
             let tag = u32::from_be(*node_ptr);
@@ -98,8 +107,13 @@ fn set_special_addresses_from_dtb(fdt_ptr: *const u32) -> () {
                         if found_uart {
                             uart::init_uart(base_addr);
                         } else if found_virtio {
-                            // virtio::init(base_addr);
-                            virtio::init_virtio(base_addr as *const u32);
+                            if virtio_base_count < virtio_bases.len() {
+                                virtio_bases
+                                    .as_mut_ptr()
+                                    .add(virtio_base_count)
+                                    .write(core::mem::MaybeUninit::new(base_addr));
+                                virtio_base_count += 1;
+                            }
                         }
                     }
 
@@ -159,6 +173,15 @@ fn set_special_addresses_from_dtb(fdt_ptr: *const u32) -> () {
                     loop {}
                 }
             }
+        }
+
+        let mut i = 0;
+        while i < virtio_base_count {
+            if virtio::virtio_net_found() {
+                break;
+            }
+            virtio::init_virtio((*virtio_bases.as_ptr().add(i)).assume_init() as *const u32);
+            i += 1;
         }
     }
 }
